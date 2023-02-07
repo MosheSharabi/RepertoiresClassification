@@ -8,45 +8,43 @@ import numpy as np
 from configs import cfg
 from tempModel import SequentialClassifier
 import Dataset
-from sklearn.utils import class_weight
-from sklearn.model_selection import train_test_split
-
-from matplotlib import pyplot as plt
-plt.switch_backend('agg')
 
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
 os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
 
-seed_value = cfg.seed
+seed_value= cfg.seed
 random.seed(seed_value)
 np.random.seed(seed_value)
 tf.compat.v1.set_random_seed(seed_value)
-os.environ['PYTHONHASHSEED'] = str(seed_value)
+os.environ['PYTHONHASHSEED']=str(seed_value)
 os.environ["CUDA_VISIBLE_DEVICES"] = cfg.device[5:6]
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+
 # tf.compat.v1.disable_eager_execution()
 
-out_path = "/home/home/dsi/moshe_sharabi/M.Sc/RepertoiresClassification/results/" + cfg.save_dir + "/"
-os.mkdir(out_path)
-os.mkdir(out_path + '/logs')
-
-# ### divide the repertoires to train, validation and test (for each folder in ordered_data folder) ###
-# folders_path = '/home/home/dsi/moshe_sharabi/M.Sc/RepertoiresClassification/ordered_data'
-# folders_list = os.listdir(folders_path)
-# for f in range(len(folders_list)):
-#     files = os.listdir(folders_path + '/' + folders_list[f] + '/')
-#     X_train, X_test = train_test_split(files, test_size=0.2, shuffle=True)
-#     X_train, X_val = train_test_split(X_train, test_size=0.25)
 
 def main():
+    # loss_object = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE)
     my_callbacks = [
         # tf.keras.callbacks.ReduceLROnPlateau(monitor='val_auc', factor=0.9, patience=2, min_lr=0.000001),
-        tf.keras.callbacks.EarlyStopping(patience=30,monitor="val_binary_accuracy"), # patience: Number of epochs with no improvement after which training will be stopped. I can put smaller patience so the early stopping will work
+        tf.keras.callbacks.EarlyStopping(patience=30,monitor="val_binary_accuracy"),
         tf.keras.callbacks.TensorBoard(log_dir=cfg.save_dir + '/logs')
     ]
 
-    train_gen = Dataset.GeneratorOnline(mode="train", folds=cfg.X_train, batch_size=cfg.batch_size) # cfg.train_folds
-    val_gen = Dataset.GeneratorOnline(mode="validation", folds=cfg.X_val, batch_size=cfg.batch_size) # cfg.val_folds
+    if(cfg.random_sample):
+        train_gen = Dataset.GeneratorRandomFromUnitedFile(cfg.cleaned_path + r"/cubes/train/",batch_size=cfg.batch_size,
+                                                          steps_per_epoch=5000)
+        val_gen = Dataset.GeneratorRandomFromUnitedFile(cfg.cleaned_path + r"/cubes/validation/",batch_size=cfg.batch_size,
+                                                        steps_per_epoch=500)
+    elif(cfg.one_fold):
+        train_gen = Dataset.GeneratorOnline(mode="train", folds=cfg.train_folds, batch_size=cfg.batch_size,
+                                            augmentation=cfg.shaffel_augmentation,use_tags=cfg.use_tags,AE=cfg.AE)
+        val_gen = Dataset.GeneratorOnline(mode="validation", folds=cfg.val_folds, batch_size=cfg.batch_size,
+                                          use_tags=cfg.use_tags,AE=cfg.AE)
+    else:
+        train_gen = Dataset.GeneratorOnline(mode="train", batch_size=cfg.batch_size,
+                                            augmentation=cfg.shaffel_augmentation,use_tags=cfg.use_tags)
+        val_gen = Dataset.GeneratorOnline(mode="validation", batch_size=cfg.batch_size,use_tags=cfg.use_tags)
 
     z0 = train_gen.__getitem__(0)
     z0 = train_gen.__getitem__(0)
@@ -54,47 +52,90 @@ def main():
     # with tf.device('/cpu:0'):
     with tf.device(cfg.device):
         model = SequentialClassifier()
+        # AdamOptimizer = tf.keras.optimizers.Adam(learning_rate=0.01, beta_1=0.9, beta_2=0.999, amsgrad=False)
+
+    if (cfg.load_weights):
+        w1 = model.get_weights()
+        model.load_weights(cfg.weights_path, by_name=True)
+        print("weights loaded from:     ", cfg.weights_path)
+        w2 = model.get_weights()
+        for a, b in zip(w1, w2):
+            if np.all(a == b):
+                print("wtf is happening")
+
+    if (cfg.freeze_weights):
+        print("freeze weights")
+        model.get_layer(name='E_conv1').trainable = False
+        model.get_layer(name='E_conv2').trainable = False
+        model.get_layer(name='E_conv3').trainable = False
+        model.get_layer(name='E_conv4').trainable = False
+        model.get_layer(name='E_conv5').trainable = False
+        model.get_layer(name='E_conv6').trainable = False
+
+        model.get_layer(name='C_conv5').trainable = False
+        model.get_layer(name='C_conv6').trainable = False
+        model.get_layer(name='C_conv7').trainable = False
+        model.get_layer(name='C_conv8').trainable = False
+        model.get_layer(name='C_conv9').trainable = False
+        model.get_layer(name='C_conv10').trainable = False
 
     model.summary()
 
-    model.compile(cfg.optimizer, loss=tf.keras.losses.BinaryCrossentropy(),
+    if (cfg.dataset == 'biomed'):
+
+        model.compile(cfg.optimizer, loss=tf.keras.losses.CategoricalCrossentropy(),
+                      metrics=[tf.keras.metrics.CategoricalAccuracy(), tf.keras.metrics.AUC()])
+    elif ((cfg.dataset == 'celiac') | (cfg.dataset == 'cmv')):
+        if (cfg.AE):
+            model.compile(optimizer='adam', loss=tf.keras.losses.MeanSquaredError(),
+                      metrics=[tf.keras.metrics.mse])
+        else:
+            model.compile(cfg.optimizer, loss=tf.keras.losses.BinaryCrossentropy(),
                           metrics=[tf.keras.metrics.BinaryAccuracy(), tf.keras.metrics.AUC()])
 
 
-    ### define weights of the unbalanced labels for the loss: ###
-    path = cfg.data_path  #r"/home/home/dsi/moshe_sharabi/M.Sc/RepertoiresClassification/ordered_data_30000"  ## ordered_data_10000 / ordered_data_30000
-    lable_list = []
-    file_name = os.listdir(path)
-    file_name_train = [s for s in file_name if any(xs in s for xs in cfg.X_train)]
-    for file_name in file_name_train:
-        if ("positive" in file_name):  ## positive or ill
-            lable_list.append(1)
-        else:
-            lable_list.append(0)
-
-    # for file_name in os.listdir(path):
-    #     if (file_name[:2] in cfg.train_folds):  # generator holds file only from the requested folds
-    #         if ("positive" in file_name):  ## positive or ill
-    #             lable_list.append(1)
-    #         else:
-    #             lable_list.append(0)
-
-    ### calc the weights to the classes
-    class_weights = class_weight.compute_class_weight('balanced', classes=np.unique(lable_list), y=lable_list)
-    ### change weights from sklearn to tensorflow input
-    class_weights = {l:c for l,c in zip(np.unique(lable_list), class_weights)}
-    print("The weight for the classes are: ")
-    print("\t- Class 0: "+str(class_weights[0]))
-    print("\t- Class 1: "+str(class_weights[1]))
 
     with tf.device(cfg.device):
+        # a = model.get_collection(tf.GraphKeys.LOSSES)
+        # tf.compat.v1.add_to_collection('losses', tf.keras.regularizers.L1(l1=0.1)(model.v))
+        # print(model.GraphKeys)
+        # reg_losses = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.REGULARIZATION_LOSSES)
+        # a =  sum(reg_losses)
+        # v1 = model.v.numpy()
+        # print(model.losses)
+        # import math
+        # @tf.function
+        # def double_sinus_regularizer(x,a=0.01):
+        #     return tf.reduce_sum(a * (0.5 *( tf.math.sin(1.5*np.pi+2*np.pi*x) + 1) -0.1*(tf.math.sin(0.5*np.pi+4*np.pi*x) - 1)))
+        # def sinus_regularizer(x,a=0.01):
+        #     return tf.reduce_sum(a * (0.5 + tf.math.sin(1.5*np.pi+2*np.pi*x) + 0.5))
+        # def Gauss_regularizer(x,a=0.01,b=0.3,c=0):
+        #     return tf.reduce_sum(a * (1/(b*(2*math.pi)**0.5) * math.e ** (-0.5*((x-c)/b)**2)))
+        # def total_l2_regularizer(weights,a=0.00001):
+        #     return a * tf.square(tf.reduce_sum(weights))
+        #
+        # regularizer = tf.keras.regularizers.l2(0.00001)
+        # model.add_loss(lambda: regularizer(model.v1))
+        # model.add_loss(lambda: regularizer(model.v2))
+        # print(model.losses)
         history = model.fit(x=train_gen, epochs=cfg.max_epoch, verbose=1, callbacks=my_callbacks,
                             validation_data=val_gen, shuffle=True,
-                            steps_per_epoch=cfg.steps_per_epoch, validation_steps=val_gen.__len__(), # steps_per_epoch: how many epochs I do in a train epoch. if I implement the earlystopping take a smaller value of steps_per_epoch
+                            steps_per_epoch=cfg.steps_per_epoch, validation_steps=val_gen.__len__(),
                             max_queue_size=cfg.max_queue_size, workers=cfg.workers,
-                            use_multiprocessing=True, class_weight=class_weights)
+                            use_multiprocessing=True)
+        # v = model.get_weights()[40]
+        # for i in range(0,50):
+        #     print(v[10*i+0][0],v[10*i+1][0],v[10*i+2][0],v[10*i+3][0],v[10*i+4][0],v[10*i+5][0],v[10*i+6][0],v[10*i+7][0],v[10*i+8][0],v[10*i+9][0])
+        # print('min: ', model.get_weights()[40].min())
+        # print('max: ', model.get_weights()[40].max())
 
-    model.save_weights(cfg.weights_path_save, overwrite=True)
+        # print(model.v.get_weights())
+        # v2 = model.v.numpy()
+        # v2 = model.v
+        # for i in range(30):
+        #     tf.print(v2[i][0],' : ', v2[i][0])
+
+    model.save_weights(cfg.weights_path_save,overwrite=True)
     print("weights_path:    " + cfg.weights_path_save)
     # plot(history)
     # for epoch in range(cfg.max_epoch):
@@ -103,29 +144,6 @@ def main():
     #     model.load_weights(cfg.weights_path, by_name=True)
     #     print("weights loaded from:     ", cfg.weights_path)
 
-
-    ##### plot the loss and AUC: #####
-
-    history = history
-
-    fig, (ax1, ax2) = plt.subplots(2, sharex=True)
-    fig.suptitle("AUC and Loss - top K=100")
-    # summarize history for acc
-    ax1.plot(history.history['auc'])
-    ax1.plot(history.history['val_auc'])
-    ax1.set_ylabel('auc')
-    ax1.set_xlabel('epoch')
-    ax1.legend(['train', 'validation'], loc='upper left')
-    # plt.show()
-    # summarize history for loss
-    ax2.plot(history.history['loss'])
-    ax2.plot(history.history['val_loss'])
-    ax2.set_ylabel('loss')
-    ax2.set_xlabel('epoch')
-    ax2.legend(['train', 'validation'], loc='upper left')
-    # plt.show()
-    fig.savefig(out_path + cfg.weights_name + '_acc_loss.png')
-    plt.close(fig)
 
 if __name__ == '__main__':
     main()
